@@ -452,3 +452,9 @@ $RECYCLE.BIN/
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+
+# Local planning and agent workspaces
+.scratch/
+.worktrees/
+decisions.txt
+prompt_before_merging_to_main.txt
