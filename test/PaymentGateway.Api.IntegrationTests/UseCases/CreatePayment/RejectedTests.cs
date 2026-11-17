@@ -7,8 +7,59 @@ using PaymentGateway.Api.IntegrationTests.Infrastructure;
 
 namespace PaymentGateway.Api.IntegrationTests.UseCases.CreatePayment;
 
-public sealed class RequestValidationTests
+public sealed class RejectedTests
 {
+    [Fact]
+    public async Task PostPaymentAsync_WhenApiKeyIsMissing_ShouldReturnUnauthorized()
+    {
+        // ARRANGE
+        using GatewayFactory factory = new();
+        using HttpClient client = factory.CreateClient();
+
+        // ACT
+        using HttpResponseMessage response = await client.PostAsync("/api/payments", PaymentRequests.Json());
+
+        // ASSERT
+        HttpStatusCode expected = HttpStatusCode.Unauthorized;
+        HttpStatusCode actual = response.StatusCode;
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public async Task PostPaymentAsync_WhenDetailsFailPaymentRules_ShouldCreateRetrievableRejection()
+    {
+        // ARRANGE
+        await using BankStub bank = await BankStub.StartAsync();
+        using GatewayFactory factory = new(bank.Address);
+        using HttpClient client = factory.CreateMerchantClient();
+
+        // ACT
+        using HttpResponseMessage created = await client.PostAsync("/api/payments", PaymentRequests.Json(amount: 0));
+        using HttpResponseMessage retrieved = await client.GetAsync(created.Headers.Location);
+        JsonNode body = JsonNode.Parse(await retrieved.Content.ReadAsStringAsync())!;
+
+        // ASSERT
+        var expected = new
+        {
+            Created = HttpStatusCode.Created,
+            Retrieved = HttpStatusCode.OK,
+            Status = "Rejected",
+            FailureReason = 6,
+            Error = "amount_invalid",
+            BankRequests = 0
+        };
+        var actual = new
+        {
+            Created = created.StatusCode,
+            Retrieved = retrieved.StatusCode,
+            Status = (string?)body["status"],
+            FailureReason = (int)body["failure_reason"]!,
+            Error = (string?)body["errors"]![0]!["code"],
+            BankRequests = bank.Requests.Count
+        };
+        actual.Should().BeEquivalentTo(expected);
+    }
+
     [Theory]
     [InlineData("0000000000011", HttpStatusCode.UnprocessableEntity, "payment_source_invalid")]
     [InlineData("00000000000011", HttpStatusCode.Created, null)]
@@ -119,49 +170,5 @@ public sealed class RequestValidationTests
             Fields = body.AsObject().Count
         };
         actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Fact]
-    public async Task PostPaymentAsync_WhenRequestValidationFails_ShouldLeaveKeyReusable()
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bankAddress: bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-
-        // ACT
-        using HttpResponseMessage invalid = await PaymentRequests.SendAsync(client, body: "{}");
-        using HttpResponseMessage corrected = await PaymentRequests.SendAsync(client);
-
-        // ASSERT
-        var expected = new
-        {
-            Invalid = HttpStatusCode.UnprocessableEntity,
-            Corrected = HttpStatusCode.Created
-        };
-        var actual = new
-        {
-            Invalid = invalid.StatusCode,
-            Corrected = corrected.StatusCode
-        };
-        actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Fact]
-    public async Task PostPaymentAsync_WhenRequestValidationFails_ShouldSendOneBankRequest()
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bankAddress: bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-
-        // ACT
-        using HttpResponseMessage invalid = await PaymentRequests.SendAsync(client, body: "{}");
-        using HttpResponseMessage corrected = await PaymentRequests.SendAsync(client);
-
-        // ASSERT
-        int expected = 1;
-        int actual = bank.Requests.Count;
-        Assert.Equal(expected, actual);
     }
 }

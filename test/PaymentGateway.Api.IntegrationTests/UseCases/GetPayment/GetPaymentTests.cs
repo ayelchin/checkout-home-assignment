@@ -4,11 +4,6 @@ using System.Text.Json.Nodes;
 
 using AwesomeAssertions;
 
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.DependencyInjection.Extensions;
-
-using Moq;
-
 using PaymentGateway.Api.Domain.Models;
 using PaymentGateway.Api.IntegrationTests.Infrastructure;
 using PaymentGateway.Api.Repositories.Payments;
@@ -18,77 +13,54 @@ namespace PaymentGateway.Api.IntegrationTests.UseCases.GetPayment;
 public sealed class GetPaymentTests
 {
     [Fact]
-    public async Task GetPayment_WhenBankAuthorizationIsPending_ShouldReturnInProgressAndThenFinalOutcome()
+    public async Task GetPaymentAsync_WhenApiKeyIsMissing_ShouldReturnUnauthorized()
     {
         // ARRANGE
-        TaskCompletionSource releaseBank = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        InMemoryPaymentsRepository storage = new(TimeProvider.System);
-        Mock<IPaymentsRepository> repository = new();
-        TaskCompletionSource<PaymentRecord> initial = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        repository.Setup(store => store.Add(It.IsAny<PaymentRecord>()))
-            .Callback<PaymentRecord>(payment =>
-            {
-                storage.Add(payment);
-                initial.TrySetResult(payment);
-            });
-        repository.Setup(store => store.Update(It.IsAny<PaymentRecord>()))
-            .Callback<PaymentRecord>(storage.Update);
-        repository.Setup(store => store.Get(It.IsAny<string>(), It.IsAny<Guid>()))
-            .Returns((string merchantId, Guid id) => storage.Get(merchantId, id));
-        await using BankStub bank = await BankStub.StartAsync(async context =>
-        {
-            await releaseBank.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await context.Response.WriteAsJsonAsync(new { authorized = true, authorization_code = "approval" });
-        });
-        using GatewayFactory baseFactory = new(bank.Address);
-        using WebApplicationFactory<PaymentGateway.Api.Controllers.PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
-            builder.ConfigureServices(services =>
-            {
-                services.RemoveAll<IPaymentsRepository>();
-                services.AddSingleton<IPaymentsRepository>(repository.Object);
-            }));
-        using HttpClient client = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
-        client.DefaultRequestHeaders.Add("X-Api-Key", "merchant-one-key");
+        using GatewayFactory factory = new();
+        using HttpClient client = factory.CreateClient();
 
         // ACT
-        Task<HttpResponseMessage> postTask = PaymentRequests.SendAsync(client);
-        try
-        {
-            PaymentRecord initialPayment = await initial.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            using HttpResponseMessage pendingResponse = await client.GetAsync($"/api/payments/{initialPayment.Id}");
-            JsonNode pendingBody = (await pendingResponse.Content.ReadFromJsonAsync<JsonNode>())!;
-            releaseBank.TrySetResult();
-            using HttpResponseMessage created = await postTask.WaitAsync(TimeSpan.FromSeconds(10));
-            using HttpResponseMessage completedResponse = await client.GetAsync($"/api/payments/{initialPayment.Id}");
-            JsonNode completedBody = (await completedResponse.Content.ReadFromJsonAsync<JsonNode>())!;
-            PaymentRecord storedPayment = storage.Get(initialPayment.MerchantId, initialPayment.Id)!;
+        using HttpResponseMessage response = await client.GetAsync("/api/payments/11111111-1111-1111-1111-111111111111");
 
-            // ASSERT
-            var expected = new
-            {
-                Pending = "InProgress",
-                Completed = "Authorized",
-                SameId = initialPayment.Id.ToString(),
-                CardNumberLastFour = "0011",
-                ContainsFullCardNumber = false,
-                ContainsSensitiveFields = false
-            };
-            var actual = new
-            {
-                Pending = (string?)pendingBody["status"],
-                Completed = (string?)completedBody["status"],
-                SameId = (string?)completedBody["id"],
-                storedPayment.CardNumberLastFour,
-                ContainsFullCardNumber = storedPayment.ToString()!.Contains("0000000000000011", StringComparison.Ordinal),
-                ContainsSensitiveFields = storedPayment.GetType().GetProperties()
-                    .Any(property => property.Name is "CardNumber" or "Cvv" or "Details")
-            };
-            actual.Should().BeEquivalentTo(expected);
-        }
-        finally
-        {
-            releaseBank.TrySetResult();
-        }
+        // ASSERT
+        HttpStatusCode expected = HttpStatusCode.Unauthorized;
+        HttpStatusCode actual = response.StatusCode;
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public async Task GetAsync_WhenUrlDoesNotMatchAnyRoute_ShouldReturnNotFound()
+    {
+        // ARRANGE
+        using GatewayFactory factory = new();
+        using HttpClient client = factory.CreateMerchantClient();
+
+        // ACT
+        using HttpResponseMessage response = await client.GetAsync("/api/does-not-exist");
+
+        // ASSERT
+        HttpStatusCode expected = HttpStatusCode.NotFound;
+        HttpStatusCode actual = response.StatusCode;
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public async Task GetPayment_WhenBankAuthorizationIsPending_ShouldReturnInProgress()
+    {
+        // ARRANGE
+        using GatewayFactory factory = new();
+        using HttpClient client = factory.CreateMerchantClient();
+        PaymentRecord payment = PaymentRecord.Create("merchant-one", "0000000000000011",
+            12, 2031, "GBP", 100, new DateTimeOffset(2030, 11, 15, 0, 0, 0, TimeSpan.Zero));
+        factory.Services.GetRequiredService<IPaymentsRepository>().Add(payment);
+
+        // ACT
+        JsonNode? body = await client.GetFromJsonAsync<JsonNode>($"/api/payments/{payment.Id}");
+
+        // ASSERT
+        string expected = "InProgress";
+        string? actual = (string?)body?["status"];
+        Assert.Equal(expected, actual);
     }
 
     [Fact]

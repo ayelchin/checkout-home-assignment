@@ -6,18 +6,27 @@ using AwesomeAssertions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
+using Moq;
 
 using PaymentGateway.Api.Controllers;
+using PaymentGateway.Api.Domain.Models;
 using PaymentGateway.Api.IntegrationTests.Infrastructure;
+using PaymentGateway.Api.Repositories.Payments;
+using PaymentGateway.Api.Services.PaymentValidation;
+using PaymentGateway.Api.UseCases.CreatePayment;
 
 namespace PaymentGateway.Api.IntegrationTests.UseCases.CreatePayment;
 
 public sealed class IdempotencyTests
 {
     [Theory]
-    [InlineData("123")]
-    [InlineData("invalid")]
-    public async Task PostPaymentAsync_WhenKeyMatches_ShouldReplayOriginalPayment(string cvv)
+    [InlineData("123", 100)]
+    [InlineData("invalid", 100)]
+    [InlineData("123", 200)]
+    public async Task PostPaymentAsync_WhenKeyMatches_ShouldReplayOriginalPayment(string cvv, int amount)
     {
         // ARRANGE
         await using BankStub bank = await BankStub.StartAsync();
@@ -25,6 +34,7 @@ public sealed class IdempotencyTests
         using HttpClient client = factory.CreateMerchantClient();
         JsonNode retry = JsonNode.Parse(PaymentRequests.Valid)!;
         retry["cvv"] = cvv;
+        retry["amount"] = amount;
 
         // ACT
         using HttpResponseMessage first = await PaymentRequests.SendAsync(client);
@@ -38,87 +48,18 @@ public sealed class IdempotencyTests
             First = HttpStatusCode.Created,
             Second = HttpStatusCode.Created,
             Location = first.Headers.Location,
-            Body = firstBody
+            Body = firstBody,
+            BankRequests = 1
         };
         var actual = new
         {
             First = first.StatusCode,
             Second = second.StatusCode,
             Location = second.Headers.Location,
-            Body = secondBody
+            Body = secondBody,
+            BankRequests = bank.Requests.Count
         };
         actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Theory]
-    [InlineData("123")]
-    [InlineData("invalid")]
-    public async Task PostPaymentAsync_WhenKeyMatches_ShouldSendOneBankRequest(string cvv)
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-        JsonNode retry = JsonNode.Parse(PaymentRequests.Valid)!;
-        retry["cvv"] = cvv;
-
-        // ACT
-        using HttpResponseMessage first = await PaymentRequests.SendAsync(client);
-        using HttpResponseMessage second = await PaymentRequests.SendAsync(client, body: retry.ToJsonString());
-
-        // ASSERT
-        int expected = 1;
-        int actual = bank.Requests.Count;
-        Assert.Equal(expected, actual);
-    }
-
-    [Fact]
-    public async Task PostPaymentAsync_WhenKeyIsReusedWithDifferentAmount_ShouldReturnOriginalPayment()
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-        using HttpResponseMessage original = await PaymentRequests.SendAsync(client);
-
-        // ACT
-        using HttpResponseMessage response = await PaymentRequests.SendAsync(client, body: PaymentRequests.Valid.Replace("\"amount\":100", "\"amount\":200"));
-        string originalBody = await original.Content.ReadAsStringAsync();
-        string retryBody = await response.Content.ReadAsStringAsync();
-
-        // ASSERT
-        var expected = new
-        {
-            Status = HttpStatusCode.Created,
-            Location = original.Headers.Location,
-            Body = originalBody
-        };
-        var actual = new
-        {
-            Status = response.StatusCode,
-            Location = response.Headers.Location,
-            Body = retryBody
-        };
-        actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Fact]
-    public async Task PostPaymentAsync_WhenKeyIsReusedWithDifferentAmount_ShouldSendOneBankRequest()
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-        using HttpResponseMessage original = await PaymentRequests.SendAsync(client);
-
-        // ACT
-        using HttpResponseMessage response = await PaymentRequests.SendAsync(client, body: PaymentRequests.Valid.Replace("\"amount\":100", "\"amount\":200"));
-
-
-        // ASSERT
-        int expected = 1;
-        int actual = bank.Requests.Count;
-        Assert.Equal(expected, actual);
     }
 
     [Fact]
@@ -175,36 +116,17 @@ public sealed class IdempotencyTests
         {
             First = HttpStatusCode.Created,
             Second = HttpStatusCode.Created,
-            DifferentLocations = true
+            DifferentLocations = true,
+            BankRequests = 2
         };
         var actual = new
         {
             First = first.StatusCode,
             Second = second.StatusCode,
-            DifferentLocations = first.Headers.Location != second.Headers.Location
+            DifferentLocations = first.Headers.Location != second.Headers.Location,
+            BankRequests = bank.Requests.Count
         };
         actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData(" ")]
-    public async Task PostPaymentAsync_WhenKeyIsMissingOrBlank_ShouldSendTwoBankRequests(string? key)
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bank.Address);
-        using HttpClient client = factory.CreateMerchantClient();
-
-        // ACT
-        using HttpResponseMessage first = await PaymentRequests.SendAsync(client, key);
-        using HttpResponseMessage second = await PaymentRequests.SendAsync(client, key);
-
-        // ASSERT
-        int expected = 2;
-        int actual = bank.Requests.Count;
-        Assert.Equal(expected, actual);
     }
 
     [Theory]
@@ -243,34 +165,17 @@ public sealed class IdempotencyTests
         {
             First = HttpStatusCode.Created,
             Second = HttpStatusCode.Created,
-            DifferentLocations = true
+            DifferentLocations = true,
+            BankRequests = 2
         };
         var actual = new
         {
             First = first.StatusCode,
             Second = second.StatusCode,
-            DifferentLocations = first.Headers.Location != second.Headers.Location
+            DifferentLocations = first.Headers.Location != second.Headers.Location,
+            BankRequests = bank.Requests.Count
         };
         actual.Should().BeEquivalentTo(expected);
-    }
-
-    [Fact]
-    public async Task PostPaymentAsync_WhenDifferentMerchantsUseSameKey_ShouldSendTwoBankRequests()
-    {
-        // ARRANGE
-        await using BankStub bank = await BankStub.StartAsync();
-        using GatewayFactory factory = new(bank.Address);
-        using HttpClient firstMerchant = factory.CreateMerchantClient();
-        using HttpClient secondMerchant = factory.CreateMerchantClient("merchant-two-key");
-
-        // ACT
-        using HttpResponseMessage first = await PaymentRequests.SendAsync(firstMerchant);
-        using HttpResponseMessage second = await PaymentRequests.SendAsync(secondMerchant);
-
-        // ASSERT
-        int expected = 2;
-        int actual = bank.Requests.Count;
-        Assert.Equal(expected, actual);
     }
 
     [Fact]
@@ -333,4 +238,96 @@ public sealed class IdempotencyTests
         }
     }
 
+    [Fact]
+    public async Task PostPaymentAsync_WhenRequestValidationFails_ShouldLeaveKeyReusable()
+    {
+        // ARRANGE
+        await using BankStub bank = await BankStub.StartAsync();
+        using GatewayFactory factory = new(bankAddress: bank.Address);
+        using HttpClient client = factory.CreateMerchantClient();
+
+        // ACT
+        using HttpResponseMessage invalid = await PaymentRequests.SendAsync(client, body: "{}");
+        using HttpResponseMessage corrected = await PaymentRequests.SendAsync(client);
+
+        // ASSERT
+        var expected = new
+        {
+            Invalid = HttpStatusCode.UnprocessableEntity,
+            Corrected = HttpStatusCode.Created,
+            BankRequests = 1
+        };
+        var actual = new
+        {
+            Invalid = invalid.StatusCode,
+            Corrected = corrected.StatusCode,
+            BankRequests = bank.Requests.Count
+        };
+        actual.Should().BeEquivalentTo(expected);
+    }
+
+    [Fact]
+    public async Task PostPaymentAsync_WhenValidatorThrows_ShouldRetainInitialPaymentAndReleaseKeyForRetry()
+    {
+        // ARRANGE
+        // This unexpected failure cannot be triggered by ordinary HTTP input.
+        InMemoryPaymentsRepository storage = new(TimeProvider.System);
+        List<PaymentRecord> retained = [];
+        Mock<IPaymentsRepository> repository = new();
+        repository.Setup(store => store.Add(It.IsAny<PaymentRecord>()))
+            .Callback<PaymentRecord>(payment =>
+            {
+                retained.Add(payment);
+                storage.Add(payment);
+            });
+        repository.Setup(store => store.Update(It.IsAny<PaymentRecord>()))
+            .Callback<PaymentRecord>(storage.Update);
+        repository.Setup(store => store.Get(It.IsAny<string>(), It.IsAny<Guid>()))
+            .Returns((string merchantId, Guid id) => storage.Get(merchantId, id));
+        Mock<IPaymentDetailsValidator> validator = new();
+        validator.SetupSequence(service => service.Validate(It.IsAny<PaymentDetailsInput>()))
+            .Throws(new InvalidOperationException("Simulated validation failure"))
+            .Returns(new List<ErrorState>().AsReadOnly());
+        await using BankStub bank = await BankStub.StartAsync();
+        using GatewayFactory baseFactory = new(bank.Address);
+        using WebApplicationFactory<PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IPaymentsRepository>();
+                services.AddSingleton(repository.Object);
+                services.RemoveAll<IPaymentDetailsValidator>();
+                services.AddSingleton(validator.Object);
+            }));
+        using HttpClient client = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+        client.DefaultRequestHeaders.Add("X-Api-Key", "merchant-one-key");
+
+        // ACT
+        using HttpResponseMessage failed = await PaymentRequests.SendAsync(client);
+        using HttpResponseMessage retry = await PaymentRequests.SendAsync(client);
+        using HttpResponseMessage original = await client.GetAsync($"/api/payments/{retained[0].Id}");
+        string originalBody = await original.Content.ReadAsStringAsync();
+
+        // ASSERT
+        var expected = new
+        {
+            First = HttpStatusCode.InternalServerError,
+            Retry = HttpStatusCode.Created,
+            RetainedCount = 2,
+            Original = HttpStatusCode.OK,
+            OriginalStatus = "InProgress",
+            DifferentIds = true,
+            BankCalls = 1
+        };
+        var actual = new
+        {
+            First = failed.StatusCode,
+            Retry = retry.StatusCode,
+            RetainedCount = retained.Count,
+            Original = original.StatusCode,
+            OriginalStatus = (string?)JsonNode.Parse(originalBody)!["status"],
+            DifferentIds = retained[0].Id != retained[1].Id,
+            BankCalls = bank.Requests.Count
+        };
+        actual.Should().BeEquivalentTo(expected);
+    }
 }

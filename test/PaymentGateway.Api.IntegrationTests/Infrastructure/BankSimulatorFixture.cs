@@ -8,9 +8,21 @@ namespace PaymentGateway.Api.IntegrationTests.Infrastructure;
 public sealed class BankSimulatorFixture : IAsyncLifetime
 {
     private IContainer? _container;
-    public Uri Address => new($"http://{_container!.Hostname}:{_container.GetMappedPublicPort(8080)}");
+    private readonly Lazy<Task> _startup;
 
-    public async Task InitializeAsync()
+    public BankSimulatorFixture() => _startup = new(StartAsync);
+    private Uri Address => new($"http://{_container!.Hostname}:{_container.GetMappedPublicPort(8080)}");
+
+    // Controlled HTTP tests share this collection but must remain runnable without Docker.
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task<Uri> GetAddressAsync()
+    {
+        await _startup.Value;
+        return Address;
+    }
+
+    private async Task StartAsync()
     {
         try
         {
