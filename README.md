@@ -24,7 +24,7 @@ Unit and HTTP integration tests live in separate projects under `test/`.
 Install Docker Desktop with Linux containers enabled and Docker Compose. From the
 repository root:
 
-```powershell
+```sh
 docker compose up --build -d
 docker compose logs -f paymentgateway.api
 ```
@@ -39,53 +39,65 @@ keys. This demo uses HTTP and synthetic card details, without developer certific
 Real hosting would require HTTPS and separately configured secrets. Keep
 `imposters/` and `.editorconfig` unchanged.
 
+Development logs use single-line text with timestamps and correlation scopes;
+other environments use structured JSON. Payment outcomes and HTTP request summaries
+are logged at Information, while routine outgoing HTTP client messages are filtered
+to Warning. To investigate payment starts, temporarily set
+`Logging:LogLevel:PaymentGateway.Api.UseCases.CreatePayment.CreatePaymentHandler`
+to `Debug`. HTTPS redirection is disabled in Development and enabled elsewhere.
+
 ## Try the API
 
-Run these examples in PowerShell 7 after startup. Amounts use minor currency units:
+Run these curl examples in Bash after startup. Amounts use minor currency units:
 `100` means £1.00 for GBP.
 
 ### Create a payment
 
-```powershell
-$gateway = 'http://localhost:5055'
-$headers = @{
-    'X-Api-Key' = 'local-merchant-one-key'
-    'Idempotency-Key' = [guid]::NewGuid().ToString()
-}
-$body = @{
-    cardNumber = '0000000000000011'
-    cvv = '123'
-    expiryMonth = 12
-    expiryYear = [DateTime]::UtcNow.Year + 1
-    currency = 'GBP'
-    amount = 100
-} | ConvertTo-Json
+```bash
+gateway='http://localhost:5055'
+idempotency_key='9ca2c519-03fa-45a2-8151-681f227a6e91'
+body='{
+  "cardNumber": "0000000000000011",
+  "cvv": "123",
+  "expiryMonth": 12,
+  "expiryYear": 2030,
+  "currency": "GBP",
+  "amount": 100
+}'
 
-$response = Invoke-WebRequest "$gateway/api/payments" -Method Post `
-    -Headers $headers -ContentType 'application/json' -Body $body
-$payment = $response.Content | ConvertFrom-Json
-$response.StatusCode  # 201
-$payment             # Authorized, failure_reason: 0
+curl -i "$gateway/api/payments" \
+  -H 'X-Api-Key: local-merchant-one-key' \
+  -H "Idempotency-Key: $idempotency_key" \
+  -H 'Content-Type: application/json' \
+  --data "$body"
+# 201; Authorized, failure_reason: 0
 ```
 
 ### Retrieve the payment
 
 The creation response includes a `Location` header pointing to the stored payment.
+Set `location` to that header's value, replacing `<payment-id>` below.
 
-```powershell
-$location = [string]$response.Headers.Location[0]
-Invoke-RestMethod "$gateway$location" -Headers $headers  # 200, same payment
+```bash
+location='/api/payments/<payment-id>'
+curl -i "$gateway$location" \
+  -H 'X-Api-Key: local-merchant-one-key'
+# 200, same payment
 ```
 
 ### Replay the attempt
 
-```powershell
-$replayed = Invoke-RestMethod "$gateway/api/payments" -Method Post `
-    -Headers $headers -ContentType 'application/json' -Body $body
-$replayed.id -eq $payment.id  # True; no second bank call
+```bash
+curl -i "$gateway/api/payments" \
+  -H 'X-Api-Key: local-merchant-one-key' \
+  -H "Idempotency-Key: $idempotency_key" \
+  -H 'Content-Type: application/json' \
+  --data "$body"
+# Same payment ID; no second bank call
 ```
 
-Use a new idempotency key for each new attempt. Change the synthetic card's final
+Use a new idempotency key for each new attempt and a future card expiry date.
+Change the synthetic card's final
 digit to try the simulator outcomes:
 
 | Final digit | Payment status | `failure_reason` |
@@ -106,7 +118,7 @@ Swagger documents the full contract, validation errors, and headers.
 
 Install the .NET 8 SDK and keep Docker Desktop running:
 
-```powershell
+```sh
 dotnet build PaymentGateway.sln
 dotnet test PaymentGateway.sln
 ```
@@ -121,11 +133,14 @@ projects and controlled integration tests without Docker.
    payment operations, bank communication, and storage without extra application layers.
 2. **Use in-memory storage for the exercise.** Payments and idempotency keys are
    lost on restart and are not shared between instances. Entries have no expiry.
-3. **Separate request errors from payment rejection.** Unusable requests return
-   422; complete requests that fail payment rules become retrievable Rejected payments.
-4. **Use whole minor units for money.** Accepted amounts are positive 32-bit
+3. **Fail fast on basic validation.** Malformed or incomplete requests return 422
+   before payment processing. Complete requests that fail payment rules become
+   retrievable Rejected payments without calling the bank.
+4. **Keep payment rules simple.** Amounts use whole minor units and are positive 32-bit
    integers. Supported currencies are GBP, USD, and EUR. Cards remain valid through
-   their printed expiry month, using UTC; Luhn and card-brand checks are outside scope.
+   their printed expiry month, using UTC. Card-scheme rules (such as Visa or
+   Mastercard checks) and Luhn validation are omitted for simplicity because the
+   exercise specifies no such requirements.
 5. **Keep merchants' payments separate.** API keys identify merchants, and a
    merchant cannot retrieve another merchant's payment. Keys are simple local
    configuration rather than a merchant onboarding system.
@@ -154,6 +169,6 @@ protection are outside this exercise. The [ADRs](docs/adr/) record the main trad
 
 ## Stop the solution
 
-```powershell
+```sh
 docker compose down
 ```

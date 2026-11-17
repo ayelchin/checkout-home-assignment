@@ -10,6 +10,7 @@ using Moq;
 using PaymentGateway.Api.Controllers;
 using PaymentGateway.Api.Domain.Models;
 using PaymentGateway.Api.IntegrationTests.Infrastructure;
+using PaymentGateway.Api.Services.Bank;
 using PaymentGateway.Api.Services.PaymentValidation;
 using PaymentGateway.Api.UseCases.CreatePayment;
 
@@ -28,7 +29,8 @@ public sealed class ApplicationLoggingTests
         using CapturingLoggerProvider logs = new();
         using GatewayFactory baseFactory = new(bank.Address);
         using WebApplicationFactory<PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
-            builder.ConfigureLogging(logging => logging.AddProvider(logs)));
+            builder.ConfigureLogging(logging => logging.AddProvider(logs)
+                .AddFilter(typeof(AcquiringBankService).FullName, LogLevel.Debug)));
         using HttpClient client = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         client.DefaultRequestHeaders.Add("X-Api-Key", "merchant-one-key");
 
@@ -46,7 +48,11 @@ public sealed class ApplicationLoggingTests
             FailureReason = failureReason,
             Found = (object)true,
             SamePayment = true,
-            WarningsOrErrors = 0
+            WarningsOrErrors = 0,
+            Started = 0,
+            HttpClientInformation = 0,
+            BankStarted = 1,
+            BankCompleted = new[] { new { Level = LogLevel.Debug, Authorized = (object)authorized } }
         };
         var actual = new
         {
@@ -55,7 +61,12 @@ public sealed class ApplicationLoggingTests
             FailureReason = completed.Fields["FailureReason"]?.ToString(),
             Found = found.Fields["Found"],
             SamePayment = Equals(completed.Fields["PaymentId"], found.Fields["PaymentId"]),
-            WarningsOrErrors = logs.Entries.Count(entry => entry.Category.StartsWith("PaymentGateway.Api.") && entry.Level >= LogLevel.Warning)
+            WarningsOrErrors = logs.Entries.Count(entry => entry.Category.StartsWith("PaymentGateway.Api.") && entry.Level >= LogLevel.Warning),
+            Started = logs.Entries.Count(entry => entry.EventId.Name == "PaymentAttemptStarted"),
+            HttpClientInformation = logs.Entries.Count(entry => entry.Category.StartsWith("System.Net.Http.HttpClient") && entry.Level < LogLevel.Warning),
+            BankStarted = logs.Entries.Count(entry => entry.EventId.Name == "BankAuthorizationStarted" && entry.Level == LogLevel.Debug),
+            BankCompleted = logs.Entries.Where(entry => entry.EventId.Name == "BankAuthorizationCompleted")
+                .Select(entry => new { Level = entry.Level, Authorized = entry.Fields["Authorized"] }).ToArray()
         };
         actual.Should().BeEquivalentTo(expected);
     }
@@ -290,7 +301,7 @@ public sealed class ApplicationLoggingTests
         // ASSERT
         var expected = new
         {
-            Started = 1,
+            Completed = 1,
             Replayed = 1,
             HttpSummaries = 2,
             ReplayLevel = LogLevel.Information,
@@ -298,7 +309,7 @@ public sealed class ApplicationLoggingTests
         };
         var actual = new
         {
-            Started = logs.Entries.Count(entry => entry.EventId.Name == "PaymentAttemptStarted"),
+            Completed = logs.Entries.Count(entry => entry.EventId.Name == "PaymentAttemptCompleted"),
             Replayed = logs.Entries.Count(entry => entry.EventId.Name == "IdempotencyReplayed"),
             HttpSummaries = logs.Entries.Count(entry => entry.Category.EndsWith("HttpLoggingMiddleware")),
             ReplayLevel = logs.Entries.FirstOrDefault(entry => entry.EventId.Name == "IdempotencyReplayed")?.Level,
@@ -315,7 +326,7 @@ public sealed class ApplicationLoggingTests
         using GatewayFactory baseFactory = new();
         using WebApplicationFactory<PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
             builder.ConfigureLogging(logging => logging.AddProvider(logs)));
-        using HttpClient client = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        using HttpClient client = factory.CreateClient(new() { BaseAddress = new Uri("http://localhost"), AllowAutoRedirect = false });
 
         // ACT
         using HttpResponseMessage response = await client.GetAsync("/api/payments/11111111-1111-1111-1111-111111111111");
@@ -372,7 +383,8 @@ public sealed class ApplicationLoggingTests
         using CapturingLoggerProvider logs = new();
         using GatewayFactory baseFactory = new();
         using WebApplicationFactory<PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
-            builder.ConfigureLogging(logging => logging.AddProvider(logs)));
+            builder.ConfigureLogging(logging => logging.AddProvider(logs)
+                .AddFilter(typeof(CreatePaymentHandler).FullName, LogLevel.Debug)));
         using HttpClient client = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         client.DefaultRequestHeaders.Add("X-Api-Key", "merchant-one-key");
 
@@ -383,10 +395,12 @@ public sealed class ApplicationLoggingTests
         // ASSERT
         var expected = new[]
         {
-            new { Event = "PaymentAttemptStarted", Level = LogLevel.Information, PaymentId = paymentId,
-                MerchantId = "merchant-one", Status = (string?)null, FailureReason = (string?)null },
+            new { Event = "PaymentAttemptStarted", Level = LogLevel.Debug, PaymentId = paymentId,
+                MerchantId = "merchant-one", Status = (string?)null, FailureReason = (string?)null, ValidationCodes = (string?)null },
+            new { Event = "PaymentDetailsRejected", Level = LogLevel.Warning, PaymentId = paymentId,
+                MerchantId = "merchant-one", Status = (string?)null, FailureReason = (string?)null, ValidationCodes = (string?)"amount_invalid" },
             new { Event = "PaymentAttemptCompleted", Level = LogLevel.Information, PaymentId = paymentId,
-                MerchantId = "merchant-one", Status = (string?)"Rejected", FailureReason = (string?)"InvalidPaymentDetails" }
+                MerchantId = "merchant-one", Status = (string?)"Rejected", FailureReason = (string?)"InvalidPaymentDetails", ValidationCodes = (string?)null }
         };
         var actual = logs.Entries.Where(entry => entry.Category.EndsWith("CreatePaymentHandler"))
             .Select(entry => new
@@ -396,8 +410,39 @@ public sealed class ApplicationLoggingTests
                 PaymentId = entry.Fields.GetValueOrDefault("PaymentId")?.ToString(),
                 MerchantId = entry.Fields.GetValueOrDefault("MerchantId")?.ToString(),
                 Status = entry.Fields.GetValueOrDefault("PaymentStatus")?.ToString(),
-                FailureReason = entry.Fields.GetValueOrDefault("FailureReason")?.ToString()
+                FailureReason = entry.Fields.GetValueOrDefault("FailureReason")?.ToString(),
+                ValidationCodes = entry.Fields.GetValueOrDefault("ValidationCodes")?.ToString()
             }).ToArray();
         actual.Should().BeEquivalentTo(expected, options => options.WithStrictOrdering());
+    }
+
+    [Theory]
+    [InlineData("invalid-json-with-sensitive-bank-data")]
+    [InlineData("null")]
+    public async Task PostPaymentAsync_WhenBankResponseIsUnexpected_ShouldLogSafeError(string bankResponse)
+    {
+        // ARRANGE
+        await using BankStub bank = await BankStub.StartAsync(context => context.Response.WriteAsync(bankResponse));
+        using CapturingLoggerProvider logs = new();
+        using GatewayFactory baseFactory = new(bank.Address);
+        using WebApplicationFactory<PaymentsController> factory = baseFactory.WithWebHostBuilder(builder =>
+            builder.ConfigureLogging(logging => logging.AddProvider(logs)));
+        using HttpClient client = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        client.DefaultRequestHeaders.Add("X-Api-Key", "merchant-one-key");
+
+        // ACT
+        using HttpResponseMessage response = await PaymentRequests.SendAsync(client);
+
+        // ASSERT
+        var expected = new[] { new { Level = LogLevel.Error, Category = (object)"UnexpectedFailure", HasException = false, LeaksResponse = false } };
+        var actual = logs.Entries.Where(entry => entry.EventId.Name == "BankAuthorizationFailed")
+            .Select(entry => new
+            {
+                Level = entry.Level,
+                Category = entry.Fields["FailureCategory"],
+                HasException = entry.Exception is not null,
+                LeaksResponse = (entry.Message + string.Join(" ", entry.Fields.Values)).Contains("sensitive-bank-data")
+            }).ToArray();
+        actual.Should().BeEquivalentTo(expected);
     }
 }

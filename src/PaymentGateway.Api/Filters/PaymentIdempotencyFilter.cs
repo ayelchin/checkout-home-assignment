@@ -41,6 +41,8 @@ public sealed class PaymentIdempotencyFilter(ILogger<PaymentIdempotencyFilter> l
         PaymentIdempotencyEntry entry = _entries.GetOrAdd(cacheKey, candidate);
         if (!ReferenceEquals(candidate, entry))
         {
+            logger.LogInformation(LogEvents.IdempotencyKeyMatched,
+                "Matching idempotency key found for merchant {MerchantId}; replaying payment response", cacheKey.MerchantId);
             context.Result = await entry.Result.Task;
             logger.LogInformation(LogEvents.IdempotencyReplayed,
                 "Payment response replayed for merchant {MerchantId}", cacheKey.MerchantId);

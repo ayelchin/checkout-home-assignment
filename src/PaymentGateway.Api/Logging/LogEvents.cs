@@ -10,4 +10,8 @@ public static class LogEvents
     public static readonly EventId BankAuthorizationFailed = new(1005, nameof(BankAuthorizationFailed));
     public static readonly EventId UnhandledException = new(1006, nameof(UnhandledException));
     public static readonly EventId ClientDisconnected = new(1007, nameof(ClientDisconnected));
+    public static readonly EventId PaymentDetailsRejected = new(1008, nameof(PaymentDetailsRejected));
+    public static readonly EventId BankAuthorizationStarted = new(1009, nameof(BankAuthorizationStarted));
+    public static readonly EventId BankAuthorizationCompleted = new(1010, nameof(BankAuthorizationCompleted));
+    public static readonly EventId IdempotencyKeyMatched = new(1011, nameof(IdempotencyKeyMatched));
 }

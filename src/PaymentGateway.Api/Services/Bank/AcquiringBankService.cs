@@ -25,6 +25,7 @@ public sealed class AcquiringBankService(
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(_options.Value.ResponseTimeoutSeconds), _clock);
         try
         {
+            _logger.LogDebug(LogEvents.BankAuthorizationStarted, "Bank authorization started");
             using HttpResponseMessage response = await _client.PostAsJsonAsync("/payments", new
             {
                 card_number = request.CardNumber,
@@ -43,8 +44,11 @@ public sealed class AcquiringBankService(
 
             AuthorizationResponse result = (await response.Content.ReadFromJsonAsync<AuthorizationResponse>(cancellationToken: timeout.Token))!;
 
-            return new(result.Authorized ? PaymentStatus.Authorized : PaymentStatus.Declined,
+            BankAuthorizationResult authorization = new(result.Authorized ? PaymentStatus.Authorized : PaymentStatus.Declined,
                 result.Authorized ? PaymentFailureReason.None : PaymentFailureReason.BankDeclined, result);
+            _logger.LogDebug(LogEvents.BankAuthorizationCompleted,
+                "Bank authorization completed: authorized {Authorized}", result.Authorized);
+            return authorization;
         }
         catch (OperationCanceledException)
         {
@@ -62,7 +66,7 @@ public sealed class AcquiringBankService(
         }
         catch (Exception)
         {
-            _logger.LogWarning(LogEvents.BankAuthorizationFailed, "Bank authorization failed: {FailureCategory}", "UnexpectedFailure");
+            _logger.LogError(LogEvents.BankAuthorizationFailed, "Bank authorization failed: {FailureCategory}", "UnexpectedFailure");
             return new(PaymentStatus.Declined, PaymentFailureReason.BankUnavailable);
         }
     }

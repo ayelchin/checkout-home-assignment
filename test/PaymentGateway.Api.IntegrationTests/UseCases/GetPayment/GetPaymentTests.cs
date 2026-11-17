@@ -1,10 +1,10 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 
 using AwesomeAssertions;
 
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 using Moq;
@@ -21,7 +21,6 @@ public sealed class GetPaymentTests
     public async Task GetPayment_WhenBankAuthorizationIsPending_ShouldReturnInProgressAndThenFinalOutcome()
     {
         // ARRANGE
-        TaskCompletionSource bankArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         TaskCompletionSource releaseBank = new(TaskCreationOptions.RunContinuationsAsynchronously);
         InMemoryPaymentsRepository storage = new(TimeProvider.System);
         Mock<IPaymentsRepository> repository = new();
@@ -38,7 +37,6 @@ public sealed class GetPaymentTests
             .Returns((string merchantId, Guid id) => storage.Get(merchantId, id));
         await using BankStub bank = await BankStub.StartAsync(async context =>
         {
-            bankArrived.TrySetResult();
             await releaseBank.Task.WaitAsync(TimeSpan.FromSeconds(10));
             await context.Response.WriteAsJsonAsync(new { authorized = true, authorization_code = "approval" });
         });
@@ -56,14 +54,14 @@ public sealed class GetPaymentTests
         Task<HttpResponseMessage> postTask = PaymentRequests.SendAsync(client);
         try
         {
-            await bankArrived.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            PaymentGateway.Api.Domain.Models.PaymentRecord initialPayment = await initial.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            PaymentRecord initialPayment = await initial.Task.WaitAsync(TimeSpan.FromSeconds(10));
             using HttpResponseMessage pendingResponse = await client.GetAsync($"/api/payments/{initialPayment.Id}");
-            JsonNode pendingBody = JsonNode.Parse(await pendingResponse.Content.ReadAsStringAsync())!;
+            JsonNode pendingBody = (await pendingResponse.Content.ReadFromJsonAsync<JsonNode>())!;
             releaseBank.TrySetResult();
             using HttpResponseMessage created = await postTask.WaitAsync(TimeSpan.FromSeconds(10));
             using HttpResponseMessage completedResponse = await client.GetAsync($"/api/payments/{initialPayment.Id}");
-            JsonNode completedBody = JsonNode.Parse(await completedResponse.Content.ReadAsStringAsync())!;
+            JsonNode completedBody = (await completedResponse.Content.ReadFromJsonAsync<JsonNode>())!;
+            PaymentRecord storedPayment = storage.Get(initialPayment.MerchantId, initialPayment.Id)!;
 
             // ASSERT
             var expected = new
@@ -71,17 +69,19 @@ public sealed class GetPaymentTests
                 Pending = "InProgress",
                 Completed = "Authorized",
                 SameId = initialPayment.Id.ToString(),
-                SafeRetention = true
+                CardNumberLastFour = "0011",
+                ContainsFullCardNumber = false,
+                ContainsSensitiveFields = false
             };
             var actual = new
             {
                 Pending = (string?)pendingBody["status"],
                 Completed = (string?)completedBody["status"],
                 SameId = (string?)completedBody["id"],
-                SafeRetention = new[] { storage.Get(initialPayment.MerchantId, initialPayment.Id)! }.All(payment =>
-                    payment.CardNumberLastFour == "0011" &&
-                    !payment.ToString()!.Contains("0000000000000011", StringComparison.Ordinal) &&
-                    payment.GetType().GetProperties().All(property => property.Name is not "CardNumber" and not "Cvv" and not "Details"))
+                storedPayment.CardNumberLastFour,
+                ContainsFullCardNumber = storedPayment.ToString()!.Contains("0000000000000011", StringComparison.Ordinal),
+                ContainsSensitiveFields = storedPayment.GetType().GetProperties()
+                    .Any(property => property.Name is "CardNumber" or "Cvv" or "Details")
             };
             actual.Should().BeEquivalentTo(expected);
         }
@@ -101,7 +101,7 @@ public sealed class GetPaymentTests
 
         // ACT
         using HttpResponseMessage response = await client.GetAsync(created.Headers.Location);
-        JsonNode body = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        JsonNode body = (await response.Content.ReadFromJsonAsync<JsonNode>())!;
 
         // ASSERT
         var expected = new
@@ -143,6 +143,7 @@ public sealed class GetPaymentTests
 
         // ACT
         using HttpResponseMessage foreign = await other.GetAsync($"{created.Headers.Location}?merchantId=merchant-one");
+
         // ASSERT
         HttpStatusCode expected = HttpStatusCode.NotFound;
         HttpStatusCode actual = foreign.StatusCode;

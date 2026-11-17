@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 
 using PaymentGateway.Api.Domain.Models;
@@ -15,7 +14,7 @@ public sealed class PaymentDetailsValidator(TimeProvider clock) : IPaymentDetail
 
     public ReadOnlyCollection<ErrorState> Validate(PaymentDetailsInput request)
     {
-        ImmutableArray<ErrorState>.Builder errors = ImmutableArray.CreateBuilder<ErrorState>();
+        List<ErrorState> errors = [];
         if (request.Cvv.Length is < MinimumCvvLength or > MaximumCvvLength || request.Cvv.Any(c => c is < '0' or > '9'))
         {
             errors.Add(new("cvv", "cvv_invalid", "CVV must contain 3-4 ASCII digits."));

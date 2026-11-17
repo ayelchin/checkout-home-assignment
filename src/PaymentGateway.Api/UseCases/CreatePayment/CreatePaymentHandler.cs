@@ -21,10 +21,11 @@ public sealed class CreatePaymentHandler(
             input.Details.CardNumber, input.Details.ExpiryMonth,
             input.Details.ExpiryYear, input.Details.Currency, input.Details.Amount,
             clock.GetUtcNow());
-        payments.Add(payment);
 
-        logger.LogInformation(LogEvents.PaymentAttemptStarted,
+        logger.LogDebug(LogEvents.PaymentAttemptStarted,
             "Payment {PaymentId} started for merchant {MerchantId}", payment.Id, input.MerchantId);
+
+        payments.Add(payment);
 
         ReadOnlyCollection<ErrorState> errors = validator.Validate(input.Details);
         if (errors.Count > 0)
@@ -32,6 +33,9 @@ public sealed class CreatePaymentHandler(
             payment.SetErrors(errors);
             payment.SetFailureReason(PaymentFailureReason.InvalidPaymentDetails);
             payment.SetStatus(PaymentStatus.Rejected);
+            logger.LogWarning(LogEvents.PaymentDetailsRejected,
+                "Payment {PaymentId} for merchant {MerchantId} rejected: {ValidationCodes}",
+                payment.Id, input.MerchantId, string.Join(",", errors.Select(error => error.Code)));
         }
         else
         {
@@ -42,9 +46,11 @@ public sealed class CreatePaymentHandler(
         }
 
         payments.Update(payment);
+
         logger.LogInformation(LogEvents.PaymentAttemptCompleted,
             "Payment {PaymentId} for merchant {MerchantId} completed with {PaymentStatus}, failure reason {FailureReason}",
             payment.Id, input.MerchantId, payment.Status, payment.FailureReason);
+
         return payment;
     }
 }
