@@ -456,5 +456,3 @@ $RECYCLE.BIN/
 # Local planning and agent workspaces
 .scratch/
 .worktrees/
-decisions.txt
-prompt_before_merging_to_main.txt
